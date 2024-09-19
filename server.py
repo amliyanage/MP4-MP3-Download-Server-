@@ -2,16 +2,16 @@ import http.server
 import socketserver
 import yt_dlp as youtube_dl
 import json
+from urllib.parse import urlparse, parse_qs
 
 PORT = 8000
-
 
 class RequestHandler(http.server.SimpleHTTPRequestHandler):
     def do_OPTIONS(self):
         # Handle CORS preflight requests
         self.send_response(200)
         self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Access-Control-Allow-Methods', 'POST, OPTIONS')
+        self.send_header('Access-Control-Allow-Methods', 'POST, GET, OPTIONS')
         self.send_header('Access-Control-Allow-Headers', 'Content-Type')
         self.end_headers()
 
@@ -74,6 +74,77 @@ class RequestHandler(http.server.SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(error_message.encode())
 
+    def do_GET(self):
+        parsed_path = urlparse(self.path)
+        query_params = parse_qs(parsed_path.query)
+
+        youtube_url = query_params.get('url', [None])[0]
+        format = query_params.get('format', [None])[0]
+
+        if not youtube_url or not format:
+            self.send_response(400)
+            self.send_header('Content-type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            error_message = json.dumps({"error": "URL and format are required"})
+            self.wfile.write(error_message.encode())
+            return
+
+        try:
+            # Set up yt-dlp options to get info without downloading the file
+            ydl_opts = {
+                'skip_download': True,  # Don't download the video
+                'format': 'bestaudio/best' if format == 'mp3' else 'bestvideo+bestaudio/best'
+            }
+
+            with youtube_dl.YoutubeDL(ydl_opts) as ydl:
+                # Get video info without downloading
+                video_info = ydl.extract_info(youtube_url, download=False)
+
+            if format == 'mp3':
+                # Extract the download link for MP3
+                formats = video_info.get('formats', [])
+                for fmt in formats:
+                    if fmt.get('ext') == 'm4a' and fmt.get('acodec') != 'none':
+                        download_link = fmt.get('url')
+                        response_data = {
+                            "response": download_link
+                        }
+                        break
+                else:
+                    response_data = {"error": "MP3 format not found"}
+            elif format in ['1440p', '1080p', '720p', '480p', '360p']:
+                # Extract the download link for MP4
+                formats = video_info.get('formats', [])
+                for fmt in formats:
+                    if fmt.get('height') == int(format.replace('p', '')) and fmt.get('ext') == 'mp4':
+                        download_link = fmt.get('url')
+                        response_data = {
+                            "response": download_link
+                        }
+                        break
+                else:
+                    response_data = {"error": "MP4 format not found"}
+            else:
+                response_data = {"error": "Unsupported format or resolution"}
+
+            # Convert response to JSON format
+            response_json = json.dumps(response_data)
+
+            # Send response back to the client
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(response_json.encode())
+        except Exception as e:
+            # Handle errors if URL is invalid or other exceptions occur
+            error_message = json.dumps({"error": str(e)})
+            self.send_response(400)
+            self.send_header('Content-type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(error_message.encode())
 
 # Start the server
 with socketserver.TCPServer(("", PORT), RequestHandler) as httpd:
